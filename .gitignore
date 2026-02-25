@@ -1,0 +1,6 @@
+descargas/
+procesados/
+*.session
+*.session-journal
+__pycache__/
+datos_extraidos.csv
