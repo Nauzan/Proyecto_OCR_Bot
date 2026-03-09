@@ -1,11 +1,11 @@
 # Usamos una imagen base de Python
 FROM python:3.9-slim
 
-# Instalamos Tesseract OCR y dependencias de sistema
+# Instalamos Tesseract OCR y dependencias de sistema actualizadas
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-spa \
-    libgl1-mesa-glx \
+    libgl1 \
     && apt-get clean
 
 # Creamos las carpetas necesarias
