@@ -9,111 +9,89 @@ import platform
 import http.server
 import socketserver
 import threading
+import telebot
 from datetime import datetime
 
-# 1. AJUSTE NUBE: Configuración inteligente de rutas
+# --- 1. CONFIGURACIÓN DE RUTAS ---
 if platform.system() == "Windows":
     pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
     CARPETA_PROYECTO = r'C:\Proyecto_OCR'
 else:
-    # Ruta estándar para Linux (Render)
     pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
     CARPETA_PROYECTO = os.getcwd()
 
 CARPETA_DESCARGAS = os.path.join(CARPETA_PROYECTO, 'descargas')
-CARPETA_PROCESADOS = os.path.join(CARPETA_PROYECTO, 'procesados')
 ARCHIVO_EXCEL = os.path.join(CARPETA_PROYECTO, 'datos_extraidos.csv')
 
-# Crear carpetas si no existen
-for carpeta in [CARPETA_DESCARGAS, CARPETA_PROCESADOS]:
+for carpeta in [CARPETA_DESCARGAS]:
     if not os.path.exists(carpeta):
         os.makedirs(carpeta)
 
-# --- MINI SERVIDOR PARA RENDER (Engaña al sistema para que sea Gratis) ---
+# --- 2. CONEXIÓN CON TELEGRAM ---
+# Render usará la variable de entorno que ya configuraste
+TOKEN = os.environ.get("BOT_TOKEN")
+bot = telebot.TeleBot(TOKEN)
+
+# --- 3. SERVIDOR DE SALUD PARA RENDER ---
 def responder_a_render():
-    """Crea un servidor web básico para que Render no apague el servicio"""
     PORT = int(os.environ.get("PORT", 8080))
     handler = http.server.SimpleHTTPRequestHandler
-    try:
-        with socketserver.TCPServer(("", PORT), handler) as httpd:
-            print(f"📡 Servidor de salud activo en puerto {PORT}")
-            httpd.serve_forever()
-    except Exception as e:
-        print(f"⚠️ Error en servidor de salud: {e}")
+    with socketserver.TCPServer(("", PORT), handler) as httpd:
+        print(f"📡 Servidor de salud activo en puerto {PORT}")
+        httpd.serve_forever()
 
-# --- AJUSTE FINAL: Función de Preprocesamiento integrada ---
+# --- 4. LÓGICA DE PROCESAMIENTO OCR ---
 def mejorar_imagen_ocr(ruta_imagen):
-    try:
-        with Image.open(ruta_imagen) as img:
-            img = img.convert('L') 
-            img = ImageOps.autocontrast(img) 
-            img = img.filter(ImageFilter.SHARPEN) 
-            return img
-    except Exception as e:
-        print(f"⚠️ Error mejorando imagen: {e}")
-        return Image.open(ruta_imagen)
-
-def limpiar_texto_general(texto):
-    if not texto: return "Desconocido"
-    limpio = texto.replace("nÃºmero", "numero").replace("Â", "").replace("©", "")
-    return limpio.strip()
+    with Image.open(ruta_imagen) as img:
+        img = img.convert('L') 
+        img = ImageOps.autocontrast(img) 
+        img = img.filter(ImageFilter.SHARPEN) 
+        return img
 
 def extraer_solo_telefono(texto):
-    telefono = re.sub(r'[^0-9+]', '', texto)
-    if len(telefono) < 7:
-        return "Revisión Manual"
-    return telefono
+    numeros = re.findall(r'\+?\d[\d\s-]{7,}\d', texto)
+    return numeros[0] if numeros else "No encontrado"
 
-def procesar_imagen_especifica(nombre_imagen):
-    ruta_img = os.path.join(CARPETA_DESCARGAS, nombre_imagen)
+# --- 5. EL BOT ESCUCHA EL GRUPO ---
+@bot.message_handler(content_types=['photo'])
+def manejar_foto(message):
     try:
-        imagen_preprocesada = mejorar_imagen_ocr(ruta_img)
-        texto_raw = pytesseract.image_to_string(imagen_preprocesada, lang='spa')
+        print(f"📸 Foto recibida de {message.from_user.first_name}")
+        
+        # Descargar la foto
+        file_info = bot.get_file(message.photo[-1].file_id)
+        downloaded_file = bot.download_file(file_info.file_path)
+        ruta_temp = os.path.join(CARPETA_DESCARGAS, f"foto_{message.chat.id}.jpg")
+        
+        with open(ruta_temp, 'wb') as new_file:
+            new_file.write(downloaded_file)
+
+        # Procesar con OCR
+        img_prep = mejorar_imagen_ocr(ruta_temp)
+        texto_raw = pytesseract.image_to_string(img_prep, lang='spa')
+        
+        # Extraer Datos
+        lineas = [l.strip() for l in texto_raw.split('\n') if l.strip()]
+        empresa = lineas[0] if lineas else "Desconocido"
+        telefono = extraer_solo_telefono(texto_raw)
+
+        # Responder al grupo inmediatamente
+        respuesta = (f"✅ **¡Lectura Exitosa!**\n\n"
+                     f"🏢 **Empresa:** {empresa}\n"
+                     f"📞 **Teléfono:** {telefono}\n"
+                     f"🕒 **Fecha:** {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        
+        bot.reply_to(message, respuesta)
+        print(f"✅ Datos enviados al grupo: {empresa}")
+
     except Exception as e:
-        print(f"❌ No se pudo leer {nombre_imagen}: {e}")
-        return
-
-    if texto_raw.strip():
-        lineas = [l for l in texto_raw.split('\n') if l.strip()]
-        nombre_raw = lineas[0] if len(lineas) > 0 else "Desconocido"
-        nombre_limpio = limpiar_texto_general(nombre_raw)
-        telefono_limpio = extraer_solo_telefono(texto_raw)
-
-        nuevo_registro = {
-            'Fecha_Captura': [datetime.now().strftime("%d/%m/%Y %H:%M")],
-            'Empresa_Nombre': [nombre_limpio],
-            'Telefono_Limpio': [telefono_limpio],
-            'Imagen_Referencia': [nombre_imagen],
-            'Estado': ['Verificado' if telefono_limpio != "Revisión Manual" else 'Incompleto']
-        }
-        
-        df = pd.DataFrame(nuevo_registro)
-        if not os.path.isfile(ARCHIVO_EXCEL):
-            df.to_csv(ARCHIVO_EXCEL, index=False, encoding='utf-8-sig')
-        else:
-            df.to_csv(ARCHIVO_EXCEL, mode='a', index=False, header=False, encoding='utf-8-sig')
-        
-        print(f"✅ Guardado: {nombre_limpio} | {telefono_limpio}")
-        shutil.move(ruta_img, os.path.join(CARPETA_PROCESADOS, nombre_imagen))
-        
-    else:
-        print(f"⚠️ {nombre_imagen}: No se detectó texto legible.")
-
-def escanear_y_procesar_todo():
-    # Bucle infinito para que el bot siempre esté revisando fotos en la nube
-    print("🚀 Bot iniciado y esperando imágenes...")
-    while True:
-        if os.path.exists(CARPETA_DESCARGAS):
-            archivos = [f for f in os.listdir(CARPETA_DESCARGAS) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-            for foto in archivos:
-                procesar_imagen_especifica(foto)
-        # Espera 10 segundos antes de volver a revisar la carpeta
-        import time
-        time.sleep(10)
+        print(f"❌ Error: {e}")
+        bot.reply_to(message, "⚠️ Error al procesar la imagen.")
 
 if __name__ == "__main__":
-    # 1. Iniciamos el servidor de salud en un hilo aparte para Render
+    # Iniciar servidor de salud
     threading.Thread(target=responder_a_render, daemon=True).start()
     
-    # 2. Iniciamos el ciclo de procesamiento
-    escanear_y_procesar_todo()
+    # Iniciar el Bot (Polling)
+    print("🚀 Bot iniciado y escuchando Telegram...")
+    bot.infinity_polling()
