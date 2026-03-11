@@ -2,4 +2,4 @@ pytesseract
 pandas
 pillow
 opencv-python-headless
-telethon
+pyTelegramBotAPI
